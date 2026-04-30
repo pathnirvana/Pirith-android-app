@@ -39,7 +39,8 @@ public class MainActivity extends AppCompatActivity {
                         startActivity(intent);
                         return true;
                     }
-                } catch (java.net.MalformedURLException e) {}
+                } catch (java.net.MalformedURLException e) {
+                }
                 return false; // open index/static pages links in the webview itself
             }
         };
@@ -53,6 +54,7 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setLayoutAlgorithm(android.webkit.WebSettings.LayoutAlgorithm.SINGLE_COLUMN);
         webSettings.setBuiltInZoomControls(true);
         webSettings.setDisplayZoomControls(false);
+        webSettings.setMediaPlaybackRequiresUserGesture(false);
         myWebView.addJavascriptInterface(new WebAppInterface(this), "Android");
         myWebView.setWebViewClient(client);
 
@@ -71,7 +73,8 @@ public class MainActivity extends AppCompatActivity {
             myWebView.goBack();
             return true;
         }
-        // If it wasn't the Back key or there's no web page history, bubble up to the default
+        // If it wasn't the Back key or there's no web page history, bubble up to the
+        // default
         // system behavior (probably exit the activity)
         return super.onKeyDown(keyCode, event);
     }
@@ -83,13 +86,27 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPlay() {
                 WebView myWebView = findViewById(R.id.mainWebView);
-                if (myWebView != null) myWebView.post(() -> myWebView.evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('play');", null));
+                if (myWebView != null)
+                    myWebView.post(() -> myWebView
+                            .evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('play');", null));
             }
 
             @Override
             public void onPause() {
                 WebView myWebView = findViewById(R.id.mainWebView);
-                if (myWebView != null) myWebView.post(() -> myWebView.evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('pause');", null));
+                if (myWebView != null)
+                    myWebView.post(() -> myWebView
+                            .evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('pause');", null));
+            }
+
+            @Override
+            public void onSeekTo(long pos) {
+                WebView myWebView = findViewById(R.id.mainWebView);
+                if (myWebView != null) {
+                    double seekSecs = pos / 1000.0;
+                    myWebView.post(() -> myWebView.evaluateJavascript(
+                            "if(window.vueMediaControl) window.vueMediaControl('seekTo', " + seekSecs + ");", null));
+                }
             }
         });
     }
@@ -102,18 +119,22 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    public void updateNativeMediaState(String title, String artist, boolean isPlaying) {
-        if (mediaSession == null) return;
-        
+    public void updateNativeMediaState(String title, String artist, boolean isPlaying, long position, long duration) {
+        if (mediaSession == null)
+            return;
+
         int state = isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
+        long actions = PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
+                | PlaybackStateCompat.ACTION_SEEK_TO;
         mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                .setActions(PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE)
-                .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                .setActions(actions)
+                .setState(state, position, 1.0f)
                 .build());
 
         mediaSession.setMetadata(new MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
                 .build());
 
         mediaSession.setActive(true);
@@ -126,12 +147,13 @@ public class MainActivity extends AppCompatActivity {
         NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Media Playback", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Media Playback",
+                    NotificationManager.IMPORTANCE_LOW);
             notificationManager.createNotificationChannel(channel);
         }
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play) 
+                .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle(title)
                 .setContentText(artist)
                 .setOngoing(isPlaying)
@@ -141,11 +163,13 @@ public class MainActivity extends AppCompatActivity {
                         .setShowActionsInCompactView(0));
 
         if (isPlaying) {
-            builder.addAction(android.R.drawable.ic_media_pause, "Pause", 
-                androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PAUSE));
+            builder.addAction(android.R.drawable.ic_media_pause, "Pause",
+                    androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this,
+                            PlaybackStateCompat.ACTION_PAUSE));
         } else {
-            builder.addAction(android.R.drawable.ic_media_play, "Play", 
-                androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY));
+            builder.addAction(android.R.drawable.ic_media_play, "Play",
+                    androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this,
+                            PlaybackStateCompat.ACTION_PLAY));
         }
 
         notificationManager.notify(1, builder.build());

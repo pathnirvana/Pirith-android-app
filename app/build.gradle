@@ -6,8 +6,8 @@ android {
         applicationId "lk.pitaka.pirith"
         minSdkVersion 21
         targetSdkVersion 36
-        versionCode 17
-        versionName "1.7"
+        versionCode 19
+        versionName "1.9"
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     buildTypes {

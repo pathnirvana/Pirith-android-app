@@ -25,7 +25,19 @@ public class WebAppInterface {
             ((Activity) mContext).runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    ((MainActivity) mContext).updateNativeMediaState(title, artist, isPlaying);
+                    ((MainActivity) mContext).updateNativeMediaState(title, artist, isPlaying, 0, 0);
+                }
+            });
+        }
+    }
+
+    @JavascriptInterface
+    public void updateMediaStateFull(final String title, final String artist, final boolean isPlaying, final double positionMs, final double durationMs) {
+        if (mContext instanceof MainActivity) {
+            ((Activity) mContext).runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    ((MainActivity) mContext).updateNativeMediaState(title, artist, isPlaying, (long) positionMs, (long) durationMs);
                 }
             });
         }
