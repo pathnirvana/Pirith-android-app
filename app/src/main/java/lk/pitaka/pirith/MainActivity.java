@@ -6,11 +6,13 @@ import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import androidx.core.app.NotificationCompat;
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.os.Build;
 import android.graphics.BitmapFactory;
+import android.os.PowerManager;
 
 import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
@@ -22,11 +24,15 @@ import android.webkit.WebViewClient;
 public class MainActivity extends AppCompatActivity {
 
     private MediaSessionCompat mediaSession;
+    private PowerManager.WakeLock wakeLock;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Pirith::BackgroundAudioWakeLock");
 
         // my code below
         WebViewClient client = new WebViewClient() {
@@ -114,6 +120,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        stopService(new Intent(this, MediaForegroundService.class));
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
         if (mediaSession != null) {
             mediaSession.release();
         }
@@ -122,6 +132,22 @@ public class MainActivity extends AppCompatActivity {
     public void updateNativeMediaState(String title, String artist, boolean isPlaying, long position, long duration) {
         if (mediaSession == null)
             return;
+
+        if (isPlaying) {
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire();
+            }
+        } else {
+            // Delay release slightly to allow track transitions to complete
+            new android.os.Handler().postDelayed(() -> {
+                if (mediaSession != null && mediaSession.getController().getPlaybackState().getState() != PlaybackStateCompat.STATE_PLAYING) {
+                    if (wakeLock != null && wakeLock.isHeld()) {
+                        wakeLock.release();
+                    }
+                    stopService(new Intent(MainActivity.this, MediaForegroundService.class));
+                }
+            }, 5000);
+        }
 
         int state = isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
         long actions = PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
@@ -172,6 +198,20 @@ public class MainActivity extends AppCompatActivity {
                             PlaybackStateCompat.ACTION_PLAY));
         }
 
-        notificationManager.notify(1, builder.build());
+        Notification notification = builder.build();
+        MediaForegroundService.currentNotification = notification;
+
+        if (isPlaying) {
+            Intent serviceIntent = new Intent(this, MediaForegroundService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
+        } else {
+            // Do not stop service instantly, allow track transitions to maintain foreground priority.
+            // Update the notification directly to show the Play button.
+            notificationManager.notify(1, notification);
+        }
     }
 }
