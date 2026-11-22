@@ -1,80 +1,36 @@
 package lk.pitaka.pirith;
 
 import android.app.Activity;
-import android.content.Context;
+import android.graphics.Color;
 import android.util.Log;
 import android.view.View;
 import android.webkit.JavascriptInterface;
-import android.widget.Toast;
 
-// NOT used - just testing
+/** window.Android in the web view: things other than audio (audio is NativePlayerBridge). */
 public class WebAppInterface {
-    Context mContext;
-    /** Instantiate the interface and set the context */
-    WebAppInterface(Context c) {
-        mContext = c;
-    }
-    /** Show a toast from the web page */
-    @JavascriptInterface
-    public void showToast(String toast) {
-        Toast.makeText(mContext, toast, Toast.LENGTH_SHORT).show();
-    }
-    @JavascriptInterface
-    public void updateMediaState(final String title, final String artist, final boolean isPlaying) {
-        if (mContext instanceof MainActivity) {
-            ((Activity) mContext).runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    ((MainActivity) mContext).updateNativeMediaState(title, artist, isPlaying, 0, 0);
-                }
-            });
-        }
+    private final Activity activity;
+
+    WebAppInterface(Activity activity) {
+        this.activity = activity;
     }
 
-    @JavascriptInterface
-    public void updateMediaStateFull(final String title, final String artist, final boolean isPlaying, final double positionMs, final double durationMs) {
-        if (mContext instanceof MainActivity) {
-            ((Activity) mContext).runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    ((MainActivity) mContext).updateNativeMediaState(title, artist, isPlaying, (long) positionMs, (long) durationMs);
-                }
-            });
-        }
-    }
-
+    /** colour behind the status bar, so it matches the header in light and dark mode */
     @JavascriptInterface
     public void setStatusBarColor(final String colorHex) {
-        if (mContext instanceof Activity) {
-            ((Activity) mContext).runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        Activity activity = (Activity) mContext;
-                        int color = android.graphics.Color.parseColor(colorHex);
-                        activity.findViewById(R.id.main).setBackgroundColor(color);
+        activity.runOnUiThread(() -> {
+            try {
+                int color = Color.parseColor(colorHex);
+                activity.findViewById(R.id.main).setBackgroundColor(color);
 
-                        double luminance = (0.299 * android.graphics.Color.red(color) +
-                                0.587 * android.graphics.Color.green(color) +
-                                0.114 * android.graphics.Color.blue(color)) / 255;
-
-                        View decorView = activity.getWindow().getDecorView();
-                        int flags = decorView.getSystemUiVisibility();
-
-                        if (luminance > 0.5) {
-                            // Light background -> Dark icons
-                            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-                        } else {
-                            // Dark background -> Light icons
-                            flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-                        }
-                        decorView.setSystemUiVisibility(flags);
-
-                    } catch (Exception e) {
-                        Log.e("LOG_TAG", "Failed to set status bar color: " + e.getMessage());
-                    }
-                }
-            });
-        }
+                double luminance = (0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color)) / 255;
+                View decorView = activity.getWindow().getDecorView();
+                int flags = decorView.getSystemUiVisibility();
+                if (luminance > 0.5) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;   // light background, dark icons
+                else flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;                   // dark background, light icons
+                decorView.setSystemUiVisibility(flags);
+            } catch (Exception e) {
+                Log.e("Pirith", "Failed to set status bar color: " + e.getMessage());
+            }
+        });
     }
 }

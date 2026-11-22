@@ -1,217 +1,299 @@
 package lk.pitaka.pirith;
 
-import android.content.Context;
+import android.Manifest;
+import android.content.ComponentName;
 import android.content.Intent;
-import android.support.v4.media.session.MediaSessionCompat;
-import android.support.v4.media.session.PlaybackStateCompat;
-import android.support.v4.media.MediaMetadataCompat;
-import androidx.core.app.NotificationCompat;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
-import android.graphics.BitmapFactory;
-import android.os.PowerManager;
-
-import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-public class MainActivity extends AppCompatActivity {
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MediaMetadata;
+import androidx.media3.common.Player;
+import androidx.media3.session.MediaController;
+import androidx.media3.session.SessionToken;
 
-    private MediaSessionCompat mediaSession;
-    private PowerManager.WakeLock wakeLock;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Shows the pirith web app (app/src/main/assets, copied there by dev/sync-apps.sh of the pirith
+ * repo) in a WebView and connects it to PlaybackService.
+ *
+ * Bridge - documented in the pirith repo at src/player/native.js:
+ *   web  -> native   window.NativePlayer.command(json)   { cmd: setQueue | play | pause | seek | setRate | next | previous | sleepIn, ... }
+ *   native -> web    window.__pirithNative({ type: state | ended | queueEnd, ... })   positions in seconds
+ */
+public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "Pirith";
+
+    private WebView webView;
+    private ListenableFuture<MediaController> controllerFuture;
+    private MediaController controller;
+    private final ArrayDeque<Runnable> waitingForController = new ArrayDeque<>();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable sleepTask;
+    private int lastIndex = -1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Pirith::BackgroundAudioWakeLock");
-
-        // my code below
-        WebViewClient client = new WebViewClient() {
+        webView = findViewById(R.id.mainWebView);
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true); // playlists and listening counts are kept in localStorage
+        // the app is loaded from file:// (kept so that existing users keep their saved playlists);
+        // these two let its scripts and data files load from there
+        settings.setAllowFileAccessFromFileURLs(true);
+        settings.setAllowUniversalAccessFromFileURLs(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        webView.addJavascriptInterface(new WebAppInterface(this), "Android");
+        webView.addJavascriptInterface(new NativePlayerBridge(this), "NativePlayer");
+        webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                try {
-                    java.net.URL givenUrl = new java.net.URL(url);
-                    if (!givenUrl.toString().contains("pages/") && !givenUrl.toString().contains("index.html")) {
-                        Intent intent = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url));
-                        startActivity(intent);
-                        return true;
-                    }
-                } catch (java.net.MalformedURLException e) {
+                if (url.startsWith("file:///android_asset/")) return false; // the app itself
+                try { // everything else (pitaka.lk, tipitaka.lk, youtube ...) opens in the browser
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception e) {
+                    Log.w(TAG, "cannot open " + url, e);
                 }
-                return false; // open index/static pages links in the webview itself
+                return true;
             }
-        };
+        });
+        webView.loadUrl("file:///android_asset/index.html");
 
-        WebView myWebView = findViewById(R.id.mainWebView);
-        android.webkit.WebSettings webSettings = myWebView.getSettings();
-        webSettings.setJavaScriptEnabled(true);
-        webSettings.setDomStorageEnabled(true); // for localStorage
-        webSettings.setAllowFileAccessFromFileURLs(true);
-        webSettings.setAllowUniversalAccessFromFileURLs(true);
-        webSettings.setLayoutAlgorithm(android.webkit.WebSettings.LayoutAlgorithm.SINGLE_COLUMN);
-        webSettings.setBuiltInZoomControls(true);
-        webSettings.setDisplayZoomControls(false);
-        webSettings.setMediaPlaybackRequiresUserGesture(false);
-        myWebView.addJavascriptInterface(new WebAppInterface(this), "Android");
-        myWebView.setWebViewClient(client);
-
-        String webviewLoadUrl = "file:///android_asset/index.html";
-        Log.e("LOG_TAG", "webview Url : " + webviewLoadUrl);
-        myWebView.loadUrl(webviewLoadUrl);
-
-        setupMediaSession();
+        connectPlayer();
     }
 
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        WebView myWebView = findViewById(R.id.mainWebView);
-        // Check if the key event was the Back button and if there's history
-        if ((keyCode == KeyEvent.KEYCODE_BACK) && myWebView.canGoBack()) {
-            myWebView.goBack();
-            return true;
+    // ---------------------------------------------------------------- player connection
+
+    private void connectPlayer() {
+        SessionToken token = new SessionToken(this, new ComponentName(this, PlaybackService.class));
+        controllerFuture = new MediaController.Builder(this, token).buildAsync();
+        controllerFuture.addListener(() -> {
+            try {
+                controller = controllerFuture.get();
+            } catch (Exception e) {
+                Log.e(TAG, "could not connect to the playback service", e);
+                return;
+            }
+            // a freshly loaded web view has no queue: do not leave an old one playing unseen
+            if (controller.getMediaItemCount() > 0) {
+                controller.stop();
+                controller.clearMediaItems();
+            }
+            controller.addListener(playerListener);
+            while (!waitingForController.isEmpty()) waitingForController.poll().run();
+        }, MoreExecutors.directExecutor());
+    }
+
+    private void withController(Runnable action) {
+        if (controller != null) action.run();
+        else waitingForController.add(action);
+    }
+
+    private final Player.Listener playerListener = new Player.Listener() {
+        @Override
+        public void onMediaItemTransition(MediaItem mediaItem, int reason) {
+            // AUTO = the previous pirith played to its end (as opposed to skipped)
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && lastIndex >= 0) emit("ended", lastIndex);
+            lastIndex = controller.getCurrentMediaItemIndex();
         }
-        // If it wasn't the Back key or there's no web page history, bubble up to the
-        // default
-        // system behavior (probably exit the activity)
-        return super.onKeyDown(keyCode, event);
+
+        @Override
+        public void onPlaybackStateChanged(int playbackState) {
+            if (playbackState == Player.STATE_ENDED) {
+                emit("ended", controller.getCurrentMediaItemIndex());
+                emit("queueEnd", -1);
+            }
+        }
+
+        @Override
+        public void onEvents(@NonNull Player player, @NonNull Player.Events events) {
+            if (events.containsAny(Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_POSITION_DISCONTINUITY,
+                    Player.EVENT_MEDIA_ITEM_TRANSITION, Player.EVENT_PLAYBACK_STATE_CHANGED,
+                    Player.EVENT_PLAYBACK_PARAMETERS_CHANGED, Player.EVENT_TIMELINE_CHANGED)) {
+                emitState();
+            }
+        }
+    };
+
+    // ---------------------------------------------------------------- native -> web
+
+    private void emitState() {
+        if (controller == null) return;
+        try {
+            long duration = controller.getDuration();
+            JSONObject o = new JSONObject();
+            o.put("type", "state");
+            o.put("playing", controller.isPlaying());
+            o.put("index", controller.getCurrentMediaItemIndex());
+            o.put("position", controller.getCurrentPosition() / 1000.0);
+            o.put("duration", duration == C.TIME_UNSET ? 0 : duration / 1000.0);
+            o.put("rate", controller.getPlaybackParameters().speed);
+            send(o);
+        } catch (JSONException ignored) {
+        }
     }
 
-    private void setupMediaSession() {
-        mediaSession = new MediaSessionCompat(this, "PirithMediaSession");
+    private void emit(String type, int index) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("type", type);
+            if (index >= 0) o.put("index", index);
+            send(o);
+        } catch (JSONException ignored) {
+        }
+    }
 
-        mediaSession.setCallback(new MediaSessionCompat.Callback() {
-            @Override
-            public void onPlay() {
-                WebView myWebView = findViewById(R.id.mainWebView);
-                if (myWebView != null)
-                    myWebView.post(() -> myWebView
-                            .evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('play');", null));
-            }
+    private void send(JSONObject event) {
+        webView.evaluateJavascript("window.__pirithNative&&window.__pirithNative(" + event + ")", null);
+    }
 
-            @Override
-            public void onPause() {
-                WebView myWebView = findViewById(R.id.mainWebView);
-                if (myWebView != null)
-                    myWebView.post(() -> myWebView
-                            .evaluateJavascript("if(window.vueMediaControl) window.vueMediaControl('pause');", null));
-            }
+    // ---------------------------------------------------------------- web -> native
 
-            @Override
-            public void onSeekTo(long pos) {
-                WebView myWebView = findViewById(R.id.mainWebView);
-                if (myWebView != null) {
-                    double seekSecs = pos / 1000.0;
-                    myWebView.post(() -> myWebView.evaluateJavascript(
-                            "if(window.vueMediaControl) window.vueMediaControl('seekTo', " + seekSecs + ");", null));
-                }
+    /** called by NativePlayerBridge on the main thread */
+    void onCommand(String json) {
+        withController(() -> {
+            try {
+                run(new JSONObject(json));
+            } catch (JSONException e) {
+                Log.e(TAG, "bad command " + json, e);
             }
         });
     }
 
+    private void run(JSONObject msg) throws JSONException {
+        switch (msg.getString("cmd")) {
+            case "setQueue": setQueue(msg); break;
+            case "play":
+                askNotificationPermission();
+                if (controller.getPlaybackState() == Player.STATE_IDLE) controller.prepare();
+                controller.play();
+                break;
+            case "pause": controller.pause(); break;
+            case "seek": controller.seekTo((long) (msg.getDouble("position") * 1000)); break;
+            case "setRate": controller.setPlaybackSpeed((float) msg.getDouble("rate")); break;
+            case "next": if (controller.hasNextMediaItem()) controller.seekToNextMediaItem(); break;
+            case "previous": controller.seekToPrevious(); break; // restarts the pirith unless it has just begun
+            case "sleepIn": sleepIn(msg.optDouble("minutes", 0)); break;
+            default: Log.w(TAG, "unknown command " + msg);
+        }
+    }
+
+    private void setQueue(JSONObject msg) throws JSONException {
+        JSONArray tracks = msg.getJSONArray("tracks");
+        List<MediaItem> items = new ArrayList<>();
+        for (int i = 0; i < tracks.length(); i++) items.add(toMediaItem(tracks.getJSONObject(i)));
+        if (items.isEmpty()) return;
+        int index = Math.min(msg.optInt("index", 0), items.size() - 1);
+
+        MediaItem current = controller.getCurrentMediaItem();
+        boolean keep = msg.optBoolean("keep", false) && current != null
+                && current.mediaId.equals(items.get(index).mediaId);
+        if (keep) {
+            // the playlist was edited while playing: swap everything around the current pirith, leave it playing
+            int cur = controller.getCurrentMediaItemIndex();
+            int count = controller.getMediaItemCount();
+            if (cur + 1 < count) controller.removeMediaItems(cur + 1, count);
+            if (cur > 0) controller.removeMediaItems(0, cur);
+            if (index + 1 < items.size()) controller.addMediaItems(1, items.subList(index + 1, items.size()));
+            if (index > 0) controller.addMediaItems(0, items.subList(0, index));
+            lastIndex = index;
+            emitState();
+            return;
+        }
+        lastIndex = index;
+        controller.setMediaItems(items, index, (long) (msg.optDouble("position", 0) * 1000));
+        controller.prepare();
+        if (msg.optBoolean("play", true)) {
+            askNotificationPermission();
+            controller.play();
+        }
+    }
+
+    /** url and artwork are paths inside assets/, e.g. "audio/ariyadhamma/09-rathana.m4a" */
+    private MediaItem toMediaItem(JSONObject t) throws JSONException {
+        String url = t.getString("url");
+        Uri uri = Uri.parse("asset:///" + url);
+        MediaMetadata.Builder meta = new MediaMetadata.Builder()
+                .setTitle(t.optString("title"))
+                .setArtist(t.optString("artist"))
+                .setAlbumTitle(t.optString("album"));
+        String artwork = t.optString("artwork");
+        if (!artwork.isEmpty()) meta.setArtworkUri(Uri.parse("asset:///" + artwork));
+        return new MediaItem.Builder()
+                .setMediaId(url)
+                .setUri(uri)
+                .setRequestMetadata(new MediaItem.RequestMetadata.Builder().setMediaUri(uri).build())
+                .setMediaMetadata(meta.build())
+                .build();
+    }
+
+    private void sleepIn(double minutes) {
+        if (sleepTask != null) handler.removeCallbacks(sleepTask);
+        sleepTask = null;
+        if (minutes <= 0) return;
+        sleepTask = () -> { if (controller != null) controller.pause(); };
+        handler.postDelayed(sleepTask, (long) (minutes * 60000));
+    }
+
+    /** Android 13+: without this the playback notification is hidden (playback itself still works) */
+    private void askNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
+    }
+
+    // ---------------------------------------------------------------- activity
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        emitState(); // the web view may have missed updates while the screen was off
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+            webView.goBack();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
     @Override
     protected void onDestroy() {
+        if (sleepTask != null) handler.removeCallbacks(sleepTask);
+        if (controller != null) controller.removeListener(playerListener);
+        if (controllerFuture != null) MediaController.releaseFuture(controllerFuture);
+        controller = null;
         super.onDestroy();
-        stopService(new Intent(this, MediaForegroundService.class));
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-        }
-        if (mediaSession != null) {
-            mediaSession.release();
-        }
-    }
-
-    public void updateNativeMediaState(String title, String artist, boolean isPlaying, long position, long duration) {
-        if (mediaSession == null)
-            return;
-
-        if (isPlaying) {
-            if (wakeLock != null && !wakeLock.isHeld()) {
-                wakeLock.acquire();
-            }
-        } else {
-            // Delay release slightly to allow track transitions to complete
-            new android.os.Handler().postDelayed(() -> {
-                if (mediaSession != null && mediaSession.getController().getPlaybackState().getState() != PlaybackStateCompat.STATE_PLAYING) {
-                    if (wakeLock != null && wakeLock.isHeld()) {
-                        wakeLock.release();
-                    }
-                    stopService(new Intent(MainActivity.this, MediaForegroundService.class));
-                }
-            }, 5000);
-        }
-
-        int state = isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
-        long actions = PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
-                | PlaybackStateCompat.ACTION_SEEK_TO;
-        mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                .setActions(actions)
-                .setState(state, position, 1.0f)
-                .build());
-
-        mediaSession.setMetadata(new MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
-                .build());
-
-        mediaSession.setActive(true);
-
-        showMediaNotification(title, artist, isPlaying);
-    }
-
-    private void showMediaNotification(String title, String artist, boolean isPlaying) {
-        String CHANNEL_ID = "media_playback_channel";
-        NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Media Playback",
-                    NotificationManager.IMPORTANCE_LOW);
-            notificationManager.createNotificationChannel(channel);
-        }
-
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(artist)
-                .setOngoing(isPlaying)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setStyle(new androidx.media.app.NotificationCompat.MediaStyle()
-                        .setMediaSession(mediaSession.getSessionToken())
-                        .setShowActionsInCompactView(0));
-
-        if (isPlaying) {
-            builder.addAction(android.R.drawable.ic_media_pause, "Pause",
-                    androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this,
-                            PlaybackStateCompat.ACTION_PAUSE));
-        } else {
-            builder.addAction(android.R.drawable.ic_media_play, "Play",
-                    androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(this,
-                            PlaybackStateCompat.ACTION_PLAY));
-        }
-
-        Notification notification = builder.build();
-        MediaForegroundService.currentNotification = notification;
-
-        if (isPlaying) {
-            Intent serviceIntent = new Intent(this, MediaForegroundService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent);
-            } else {
-                startService(serviceIntent);
-            }
-        } else {
-            // Do not stop service instantly, allow track transitions to maintain foreground priority.
-            // Update the notification directly to show the Play button.
-            notificationManager.notify(1, notification);
-        }
     }
 }
