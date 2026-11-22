@@ -10,8 +10,18 @@ android {
         versionName "3.0"
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
+    // release signing as in the other pitaka.lk apps: the key's alias and passwords come from ~/.gradle/gradle.properties
+    signingConfigs {
+        release {
+            storeFile file('/Volumes/2TB/Android/pitaka.lk.jks')
+            keyAlias findProperty('TIPITAKA_KEY_ALIAS') ?: ''
+            storePassword findProperty('TIPITAKA_STORE_PASSWORD') ?: ''
+            keyPassword findProperty('TIPITAKA_KEY_PASSWORD') ?: findProperty('TIPITAKA_STORE_PASSWORD') ?: ''
+        }
+    }
     buildTypes {
         release {
+            if (findProperty('TIPITAKA_STORE_PASSWORD')) signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
