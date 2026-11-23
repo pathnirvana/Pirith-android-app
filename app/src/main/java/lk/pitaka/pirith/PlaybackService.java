@@ -7,6 +7,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
+import androidx.media3.common.ForwardingPlayer;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -50,7 +51,7 @@ public class PlaybackService extends MediaSessionService {
         PendingIntent sessionActivity = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
-        session = new MediaSession.Builder(this, player)
+        session = new MediaSession.Builder(this, new PirithSkipper(player))
                 .setSessionActivity(sessionActivity)
                 .setCallback(new MediaSession.Callback() {
                     // items sent by a controller can arrive without their uri: restore it from the request metadata
@@ -69,6 +70,39 @@ public class PlaybackService extends MediaSessionService {
                     }
                 })
                 .build();
+    }
+
+    /**
+     * A pirith that is repeated is in the queue once for every repeat. Next / previous (notification,
+     * lock screen, headset, the app) go to another pirith: the repeats of one pirith are skipped together.
+     */
+    private static class PirithSkipper extends ForwardingPlayer {
+        PirithSkipper(Player player) { super(player); }
+
+        private String idAt(int i) { return getMediaItemAt(i).mediaId; }
+
+        private void toNext() {
+            int cur = getCurrentMediaItemIndex(), count = getMediaItemCount();
+            if (cur < 0 || cur >= count) return;
+            for (int i = cur + 1; i < count; i++) {
+                if (!idAt(i).equals(idAt(cur))) { seekTo(i, 0); return; }
+            }
+        }
+
+        private void toPrevious() {
+            int cur = getCurrentMediaItemIndex();
+            if (cur < 0 || cur >= getMediaItemCount()) return;
+            int i = cur;
+            while (i >= 0 && idAt(i).equals(idAt(cur))) i--;
+            if (i < 0) { seekTo(0); return; } // the first pirith: start it again
+            while (i > 0 && idAt(i - 1).equals(idAt(i))) i--;
+            seekTo(i, 0);
+        }
+
+        @Override public void seekToNext() { toNext(); }
+        @Override public void seekToNextMediaItem() { toNext(); }
+        @Override public void seekToPrevious() { toPrevious(); }
+        @Override public void seekToPreviousMediaItem() { toPrevious(); }
     }
 
     @Nullable

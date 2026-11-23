@@ -199,8 +199,9 @@ public class MainActivity extends AppCompatActivity {
             case "pause": controller.pause(); break;
             case "seek": controller.seekTo((long) (msg.getDouble("position") * 1000)); break;
             case "setRate": controller.setPlaybackSpeed((float) msg.getDouble("rate")); break;
-            case "next": if (controller.hasNextMediaItem()) controller.seekToNextMediaItem(); break;
-            case "previous": controller.seekToPrevious(); break; // restarts the pirith unless it has just begun
+            // PlaybackService takes both to another pirith, past the repeats of this one
+            case "next": controller.seekToNextMediaItem(); break;
+            case "previous": controller.seekToPreviousMediaItem(); break;
             case "sleepIn": sleepIn(msg.optDouble("minutes", 0)); break;
             default: Log.w(TAG, "unknown command " + msg);
         }
