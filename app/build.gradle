@@ -6,8 +6,8 @@ android {
         applicationId "lk.pitaka.pirith"
         minSdkVersion 21
         targetSdkVersion 36
-        versionCode 23
-        versionName "3.0"
+        versionCode 24
+        versionName "3.1"
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     // release signing as in the other pitaka.lk apps: the key's alias and passwords come from ~/.gradle/gradle.properties
